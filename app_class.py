@@ -1,9 +1,9 @@
 import dash
-
 from dash import Input, Output, State, ctx, dcc
 
 from stravalib import Client
-import webbrowser
+import datetime as dt
+import requests
 
 from static_layout import *
 
@@ -17,6 +17,8 @@ class DashApp:
         self.access_token = None
         self.refresh_token = None
         self.expires_at = None
+        self.expires_in = None
+        self.expires_timestamp = None
 
         self.client = Client()
 
@@ -32,11 +34,22 @@ class DashApp:
                 dcc.Location(id='current_url'),
                 dcc.Store(id='access_token', storage_type='session'),
                 dcc.Store(id='refresh_token', storage_type='session'),
+                dcc.Store(id='expires_at', storage_type='session'),
+                dcc.Store(id='expires_in', storage_type='session'),
+                dcc.Store(id='expires_timestamp', storage_type='session'),
 
-                # This Div displays the actual page content. It's initially empty
-                # If the init_load callback finds a cookie or an auth code in the URL, it gives the option to fetch
-                # updates via the Strava API.
-                # If the callback finds nothing, it generates a button that takes the user to an OAUTH page.
+                # This Div displays the actual page content. It's initially empty.
+                # There are three options:
+                # 1. We've opened the Dash app for the first time. It hasn't been authorised, so we have no access token
+                #   and the URL contains no auth-code. We need to go through OAUTH first.
+                # 2. We've been redirected here after the Strava OAUTH. There's no access token yet, but there's an
+                #   auth-code in the URL, with which we can retrieve our access/refresh tokens.
+                # 3. We've loaded an existing access/refresh token from the dcc.Store elements. We can check whether
+                #   they're still valid (via the expires_at item in storage). If not, fetch an updated token. Otherwise,
+                #   just use the loaded one as a valid one.
+                #
+                # Addendum: If a user wants to fetch an update, the app should check again whether the tokens are still
+                # valid.
                 html.Div(children=[], id='page_content'),
             ],
             id='app_layout',
@@ -79,6 +92,9 @@ class DashApp:
                 Output('page_content', 'children'),
                 Output('access_token', 'data'),
                 Output('refresh_token', 'data'),
+                Output('expires_at', 'data'),
+                Output('expires_in', 'data'),
+                Output('expires_timestamp', 'data'),
             ],
             [
                 Input('init_load_timer', 'n_intervals'),
@@ -87,10 +103,14 @@ class DashApp:
                 State('current_url', 'href'),
                 State('access_token', 'data'),
                 State('refresh_token', 'data'),
+                State('expires_at', 'data'),
+                State('expires_in', 'data'),
+                State('expires_timestamp', 'data'),
             ],
             prevent_initial_call=True,
         )
-        def checkCookie(n_intervals, current_url, access_token, refresh_token):
+        def checkCookie(n_intervals, current_url,
+                        access_token, refresh_token, expires_at, expires_in, expires_timestamp):
             trigger_id = ctx.triggered[0]['prop_id'].split(".")[0]
             if trigger_id is None:
                 print("Initial load (that should've been skipped!!!)")
@@ -100,24 +120,31 @@ class DashApp:
                 print(f'No access/refresh token cookie found. Access token in the Store component is {access_token}')
                 print(f"Access token in the class instance variable is {self.access_token}")
             else:
-                print(f"Returned the auth code found in the cookie: {access_token}")
+                print(f"Access/refresh tokens found in session storage: {access_token}; {refresh_token}")
                 self.access_token = access_token
                 self.refresh_token = refresh_token
+                self.expires_at = expires_at
+                self.expires_in = expires_in
+                self.expires_timestamp = expires_timestamp
 
-            print(current_url)
+            # Look for the auth-code in the current URL
             code_start = current_url.find("code=")
 
-            # If there is no code in the URL, then OAUTH failed (or it was never loaded)
-            if code_start == -1 and self.access_token is None:
-                print("Access token not found in neither the URL nor in a cookie.")
+            # If there is no code in the URL, and we don't already have an access/refresh token, then we need to
+            # go through an OAUTH step
+            if code_start == -1 and (self.access_token is None or self.refresh_token is None):
+                print("Access/refresh token not found. Need to re-authorise the app.")
                 return ([html.Div([
                     html.P("Click the button below to authorise the dashboard to connect to your Strava page."),
-                    html.P(
-                        "The access token will be stored as a cookie, so that you only have to click this button once"),
-                    html.P("If you ever see this page after authorising, it's because I'm a poor programmer :("),
+                    html.P("The access token will be stored in the browser session,"
+                           " so that you only have to click this button once"),
+                    html.P("If you ever see this page after authorising, it's either because you closed the browser"),
+                    html.P("...or because I've been a poor programmer :("),
                     dbc.Button("Go to OAUTH page", id="getOAUTH")
-                ])], dash.no_update, dash.no_update)
+                ])], dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update)
 
+            # If we got this far, and there is an auth-code in the URL, but we have no access/refresh token, then
+            # we must've been redirected to the Dash app after going through OAUTH. Let's fetch the tokens.
             if self.access_token is None:
                 # If there is a code in the current URL, we snag it and use it to get an access token and such.
                 code = current_url[code_start + 5:]
@@ -137,11 +164,41 @@ class DashApp:
                 self.access_token = token_response['access_token']
                 self.refresh_token = token_response['refresh_token']
                 self.expires_at = token_response['expires_at']
+                self.expires_timestamp = dt.datetime.fromtimestamp(self.expires_at, dt.timezone.utc)
+                print(self.expires_timestamp)
+                print(dt.datetime.now(dt.timezone.utc))
+                print(self.expires_timestamp - dt.datetime.now(dt.timezone.utc))
+                self.expires_in = (self.expires_timestamp - dt.datetime.now(dt.timezone.utc)).total_seconds()
+                print(self.expires_in)
+
             print(f"Access token: {self.access_token}\n"
                   f"Refresh token: {self.refresh_token}\n"
-                  f"Expires at: {self.expires_at}")
+                  f"Expires at: {self.expires_at}\n"
+                  f"Expires in: {self.expires_in}\n"
+                  f"Expires timestamp: {self.expires_timestamp}")
 
-            return ([html.P(f"Found an access token! It's {self.access_token}")], self.access_token, self.refresh_token)
+            if self.expires_in <= 0:
+                print("Access token has expired. Need to refresh it.")
+                header = {
+                    'client_id': self.client_id,
+                    'client_secret': self.client_secret,
+                    'grant_type': 'refresh_token',
+                    'refresh_token': self.refresh_token,
+                }
+
+                response = requests.post('https://www.strava.com/api/v3/oauth/token', data=header).json()
+                self.access_token = response['access_token']
+                self.refresh_token = response['refresh_token']
+                self.expires_at = response['expires_at']
+                self.expires_in = response['expires_in']
+                self.expires_timestamp = dt.datetime.now() + dt.timedelta(seconds=self.expires_in)
+
+            return ([html.P(f"Found an access token! It's {self.access_token}")],
+                    self.access_token,
+                    self.refresh_token,
+                    self.expires_at,
+                    self.expires_in,
+                    self.expires_timestamp)
 
     def runApp(self):
         self.app.run_server(debug=True, port=8080)

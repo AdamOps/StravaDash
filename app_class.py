@@ -47,7 +47,8 @@ class DashApp:
     def addCallbacks(self):
         @self.app.callback(
             [
-                Output('hidden_div', 'children')
+                # Output('hidden_div', 'children')
+                Output('current_url', 'href')
             ],
             [
                 Input('getOAUTH', 'n_clicks')
@@ -58,18 +59,20 @@ class DashApp:
                 raise dash.exceptions.PreventUpdate
 
             # print("Processing OAUTH")
-            authorize_url = self.client.authorization_url(
+            authorise_url = self.client.authorization_url(
                 client_id=self.client_id,
                 redirect_uri='http://127.0.0.1:8080/',
                 approval_prompt='auto',
                 scope=['read_all', 'profile:read_all', 'activity:read_all']
             )
 
-            # Open new tab with the OAUTH page
-            # It would be really nice if this page could open up in the same tab.
-            # Need to use Selenium instead of webbrowser for that, I think?
-            webbrowser.open(authorize_url, new=0)
-            raise dash.exceptions.PreventUpdate
+            # Open up the URL within the same tab. After pressing the OAUTH approval button, the Dash app will be
+            # reloaded. It'll then retrieve the auth-code, fetch an access/refresh token and store those in the session.
+            # Next time the Dash app is opened up, it'll simply fetch those tokens from memory instead of going through
+            # this process again.
+            # Need to implement a check for whether the access_token has expired and needs to be refreshed, which
+            # shouldn't be all that complicated.
+            return [authorise_url]
 
         @self.app.callback(
             [

@@ -5,7 +5,10 @@ from stravalib import Client
 import datetime as dt
 import requests
 
+import pandas as pd
+
 from static_layout import *
+from parameters import *
 
 
 class DashApp:
@@ -60,7 +63,6 @@ class DashApp:
     def addCallbacks(self):
         @self.app.callback(
             [
-                # Output('hidden_div', 'children')
                 Output('current_url', 'href')
             ],
             [
@@ -193,12 +195,48 @@ class DashApp:
                 self.expires_in = response['expires_in']
                 self.expires_timestamp = dt.datetime.now() + dt.timedelta(seconds=self.expires_in)
 
-            return ([html.P(f"Found an access token! It's {self.access_token}")],
+            return ([html.P(f"Found an access token! It's {self.access_token}"),
+                     dbc.Button("Fetch athlete data", id="get_data")],
                     self.access_token,
                     self.refresh_token,
                     self.expires_at,
                     self.expires_in,
                     self.expires_timestamp)
+
+        # Add a callback here that fetches athlete data and stores it somewhere.
+        # Could perhaps still use a dcc.Store for it, though it may become too much. Local storage possible, perhaps?
+        # Or yeet it onto Firebase? Would be nice if it doesn't have to retrieve the data anew each time..
+        @self.app.callback(
+            Output('hidden_div', 'children'),
+            Input('get_data', 'n_clicks'),
+        )
+        def getData(n_clicks):
+            if n_clicks is None:
+                raise dash.exceptions.PreventUpdate
+
+            athlete = self.client.get_athlete()
+            print(f"Athlete details:\n"
+                  f"Name: {athlete.firstname} {athlete.lastname}\n"
+                  f"Gender: {athlete.sex}\n"
+                  f"City: {athlete.city}\n"
+                  f"Country: {athlete.country}")
+
+            start_date = "2024-01-01T00:00:00Z"
+            activities = self.client.get_activities(after=start_date, limit=5)
+            print(activities)
+            print("Fetched activities")
+            activity_data = []
+            for activity in activities:
+                activity_dict = activity.to_dict()
+                new_data = [activity_dict.get(x) for x in activity_cols]
+                activity_data.append(new_data)
+
+            activity_df = pd.DataFrame(activity_data, columns=activity_cols)
+            activity_df['distance'] = activity_df['distance'] / 1000
+            activity_df.to_csv("results/activities.csv", sep=';', encoding='utf-8')
+            print("Written activities to file.")
+
+            raise dash.exceptions.PreventUpdate
 
     def runApp(self):
         self.app.run_server(debug=True, port=8080)

@@ -6,9 +6,14 @@ import datetime as dt
 import requests
 
 import pandas as pd
+import pathlib
+import folium
+import json
+import random
 
 from static_layout import *
 from parameters import *
+import functions as fun
 
 
 class DashApp:
@@ -205,7 +210,7 @@ class DashApp:
 
         # Add a callback here that fetches athlete data and stores it somewhere.
         # Could perhaps still use a dcc.Store for it, though it may become too much. Local storage possible, perhaps?
-        # Or yeet it onto Firebase? Would be nice if it doesn't have to retrieve the data anew each time..
+        # Or yeet it onto Firebase? Would be nice if it doesn't have to retrieve the data anew each time.
         @self.app.callback(
             Output('hidden_div', 'children'),
             Input('get_data', 'n_clicks'),
@@ -233,8 +238,31 @@ class DashApp:
 
             activity_df = pd.DataFrame(activity_data, columns=activity_cols)
             activity_df['distance'] = activity_df['distance'] / 1000
-            activity_df.to_csv("results/activities.csv", sep=';', encoding='utf-8')
+            activity_df.to_csv("results/" + str(random.randint(0, 1000)) + "activities.csv", sep=';', encoding='utf-8')
             print("Written activities to file.")
+
+            typeList = ['distance', 'time', 'latlng', 'altitude']
+
+            activity_df = activity_df.loc[:, ~activity_df.columns.str.contains('^Unnamed')]
+
+            counter = 0
+            polyLineList = []
+            distanceList = []
+            for x in activity_df['id']:
+                counter += 1
+                print("Making the map for activity # %d" % counter)
+                activityStream = fun.getStream(self.client, typeList, x)
+                streamDF = fun.storeStream(typeList, activityStream)
+                if streamDF.shape[0] != 0:
+                    streamPoly = fun.makePolyLine(streamDF)
+                    polyLineList.append(streamPoly)
+                    distanceList.append(activity_df.loc[counter - 1, 'distance'])
+
+            activityMap = fun.plotMap(polyLineList, 0, distanceList)
+            indexPath = pathlib.Path(__file__).parent / "/templates/index.html"
+
+            activityJSON = activity_df.to_json(orient='index')
+            parsed = json.loads(activityJSON)
 
             raise dash.exceptions.PreventUpdate
 

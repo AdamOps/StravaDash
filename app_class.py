@@ -10,6 +10,7 @@ import pathlib
 import folium
 import json
 import random
+from pprint import pprint
 
 from static_layout import *
 from parameters import *
@@ -116,18 +117,14 @@ class DashApp:
             ],
             prevent_initial_call=True,
         )
-        def checkCookie(n_intervals, current_url,
+        def ensureAccessToken(n_intervals, current_url,
                         access_token, refresh_token, expires_at, expires_in, expires_timestamp):
             trigger_id = ctx.triggered[0]['prop_id'].split(".")[0]
             if trigger_id is None:
                 print("Initial load (that should've been skipped!!!)")
                 raise dash.exceptions.PreventUpdate
 
-            if access_token is None:
-                print(f'No access/refresh token cookie found. Access token in the Store component is {access_token}')
-                print(f"Access token in the class instance variable is {self.access_token}")
-            else:
-                print(f"Access/refresh tokens found in session storage: {access_token}; {refresh_token}")
+            if access_token is not None:
                 self.access_token = access_token
                 self.refresh_token = refresh_token
                 self.expires_at = expires_at
@@ -140,7 +137,6 @@ class DashApp:
             # If there is no code in the URL, and we don't already have an access/refresh token, then we need to
             # go through an OAUTH step
             if code_start == -1 and (self.access_token is None or self.refresh_token is None):
-                print("Access/refresh token not found. Need to re-authorise the app.")
                 return ([html.Div([
                     html.P("Click the button below to authorise the dashboard to connect to your Strava page."),
                     html.P("The access token will be stored in the browser session,"
@@ -158,8 +154,6 @@ class DashApp:
                 code_end = code.find("&")
                 code = code[0:code_end]
 
-                print(f"Retrieved authorisation code: {code}")
-
                 # Get an access token and a refresh token. This'll let us access all the athlete information.
                 token_response = self.client.exchange_code_for_token(
                     client_id=self.client_id,
@@ -172,11 +166,7 @@ class DashApp:
                 self.refresh_token = token_response['refresh_token']
                 self.expires_at = token_response['expires_at']
                 self.expires_timestamp = dt.datetime.fromtimestamp(self.expires_at, dt.timezone.utc)
-                print(self.expires_timestamp)
-                print(dt.datetime.now(dt.timezone.utc))
-                print(self.expires_timestamp - dt.datetime.now(dt.timezone.utc))
                 self.expires_in = (self.expires_timestamp - dt.datetime.now(dt.timezone.utc)).total_seconds()
-                print(self.expires_in)
 
             print(f"Access token: {self.access_token}\n"
                   f"Refresh token: {self.refresh_token}\n"
@@ -213,6 +203,7 @@ class DashApp:
         # Or yeet it onto Firebase? Would be nice if it doesn't have to retrieve the data anew each time.
         @self.app.callback(
             Output('hidden_div', 'children'),
+            Output('current_url', 'pathname'),
             Input('get_data', 'n_clicks'),
         )
         def getData(n_clicks):
@@ -228,7 +219,8 @@ class DashApp:
 
             start_date = "2024-01-01T00:00:00Z"
             activities = self.client.get_activities(after=start_date, limit=5)
-            print(activities)
+            pprint(vars(activities))
+
             print("Fetched activities")
             activity_data = []
             for activity in activities:
@@ -238,10 +230,10 @@ class DashApp:
 
             activity_df = pd.DataFrame(activity_data, columns=activity_cols)
             activity_df['distance'] = activity_df['distance'] / 1000
-            activity_df.to_csv("results/" + str(random.randint(0, 1000)) + "activities.csv", sep=';', encoding='utf-8')
+            activity_df.to_csv("results/activities.csv", sep=';', encoding='utf-8')
             print("Written activities to file.")
 
-            typeList = ['distance', 'time', 'latlng', 'altitude']
+            type_list = ['distance', 'time', 'latlng', 'altitude']
 
             activity_df = activity_df.loc[:, ~activity_df.columns.str.contains('^Unnamed')]
 
@@ -251,8 +243,8 @@ class DashApp:
             for x in activity_df['id']:
                 counter += 1
                 print("Making the map for activity # %d" % counter)
-                activityStream = fun.getStream(self.client, typeList, x)
-                streamDF = fun.storeStream(typeList, activityStream)
+                activityStream = fun.getStream(self.client, type_list, x)
+                streamDF = fun.storeStream(type_list, activityStream)
                 if streamDF.shape[0] != 0:
                     streamPoly = fun.makePolyLine(streamDF)
                     polyLineList.append(streamPoly)
@@ -264,7 +256,10 @@ class DashApp:
             activityJSON = activity_df.to_json(orient='index')
             parsed = json.loads(activityJSON)
 
+            # The callback function should end with updating the main page
             raise dash.exceptions.PreventUpdate
+
+
 
     def runApp(self):
         self.app.run_server(debug=True, port=8080)

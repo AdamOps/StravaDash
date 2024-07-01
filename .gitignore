@@ -1,5 +1,6 @@
 /.env
-/results/strava_data.xlsx
 /old/
-/results/activities.csv
 /.idea
+/results/
+/snippets/
+/ref/

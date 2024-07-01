@@ -1,24 +1,22 @@
 import dash
-from dash import Input, Output, State, ctx, dcc
+from dash import Input, Output, State, ctx
 
 from stravalib import Client
 import datetime as dt
 import requests
 
 import pandas as pd
-import pathlib
-import folium
 import json
-import random
-from pprint import pprint
 
 from static_layout import *
 from parameters import *
 import functions as fun
+import debug_functions as defun
 
 
 class DashApp:
     def __init__(self, _client_id, _client_secret, _client_refresh):
+        # Authentication details
         self.client_id = _client_id
         self.client_secret = _client_secret
         self.client_refresh = _client_refresh
@@ -27,14 +25,21 @@ class DashApp:
         self.refresh_token = None
         self.expires_at = None
         self.expires_in = None
-        self.expires_timestamp = None
+        self.already_authorised = False
 
+        # Track the current state of the app
+        self.logged_in = False
+
+        # Strava data
         self.client = Client()
+        self.athlete = None
 
+        # Generate app instance
         self.app = dash.Dash(__name__,
                              external_stylesheets=[dbc.themes.FLATLY],
                              suppress_callback_exceptions=True)
 
+        # Initial layout
         self.app.layout = html.Div(
             [
                 navbar,
@@ -46,6 +51,8 @@ class DashApp:
                 dcc.Store(id='expires_at', storage_type='session'),
                 dcc.Store(id='expires_in', storage_type='session'),
                 dcc.Store(id='expires_timestamp', storage_type='session'),
+                dcc.Store(id='already_authorised', data=False),
+                dcc.Store(id='logged_in', storage_type='session', data=False),
 
                 # This Div displays the actual page content. It's initially empty.
                 # There are three options:
@@ -64,19 +71,61 @@ class DashApp:
             id='app_layout',
         )
 
+        # Generate all callbacks
         self.addCallbacks()
+
+    # Define methods here. The final method is the one generating all callbacks
+    def setTokens(self, response, request_type) -> None:
+        # Store the various bits of information into separate variables, for ease.
+        # Some of the responses give the same structure, but Strava API is weird.
+        self.access_token = response['access_token']
+        self.refresh_token = response['refresh_token']
+        self.already_authorised = True
+
+        if request_type == "authorise":
+            self.expires_at = dt.datetime.fromtimestamp(response['expires_at'], dt.timezone.utc)
+            self.expires_in = (self.expires_at - dt.datetime.now(dt.timezone.utc)).total_seconds()
+        elif request_type == "refresh":
+            self.expires_at = response['expires_at']
+            self.expires_in = response['expires_in']
+
+    def genPolyLineList(self, base_list, fetch_data_types, id_list):
+        if base_list is None:
+            base_list = []
+        if fetch_data_types is None:
+            fetch_data_types = ['latlng']
+        if len(id_list) == 0:
+            print("Passed an empty id-list. Breaking out of the function")
+            return None
+
+        counter = 0
+        for activity_id in id_list:
+            counter += 1
+            print("Making the map for run # %d" % counter)
+            activity_stream = fun.getStream(_client=self.client, _fetch_data_types=fetch_data_types,
+                                            _activity_id=activity_id)
+            stream_df = fun.storeStream(fetch_data_types, activity_stream)
+            if stream_df.shape[0] != 0:
+                streamPoly = fun.makePolyLine(stream_df)
+                base_list.append(streamPoly)
+                # distanceList.append(activity_df.loc[counter - 1, 'distance'])
+        return base_list
 
     def addCallbacks(self):
         @self.app.callback(
             [
-                Output('current_url', 'href')
+                Output('current_url', 'href', allow_duplicate=True)
             ],
             [
                 Input('getOAUTH', 'n_clicks')
             ],
+            [
+                State('already_authorised', 'data'),
+
+            ],
             prevent_initial_call=True, )
-        def startOAUTH(n_clicks):
-            if n_clicks is None:
+        def startOAUTH(n_clicks, already_authorised):
+            if n_clicks is None or already_authorised:
                 raise dash.exceptions.PreventUpdate
 
             # print("Processing OAUTH")
@@ -87,64 +136,51 @@ class DashApp:
                 scope=['read_all', 'profile:read_all', 'activity:read_all']
             )
 
-            # Open up the URL within the same tab. After pressing the OAUTH approval button, the Dash app will be
-            # reloaded. It'll then retrieve the auth-code, fetch an access/refresh token and store those in the session.
-            # Next time the Dash app is opened up, it'll simply fetch those tokens from memory instead of going through
-            # this process again.
             # Need to implement a check for whether the access_token has expired and needs to be refreshed, which
             # shouldn't be all that complicated.
             return [authorise_url]
 
         @self.app.callback(
             [
-                Output('page_content', 'children'),
-                Output('access_token', 'data'),
-                Output('refresh_token', 'data'),
-                Output('expires_at', 'data'),
-                Output('expires_in', 'data'),
-                Output('expires_timestamp', 'data'),
+                Output('page_content', 'children', allow_duplicate=True),
+                Output('navbar_links', 'children'),
+                Output('current_url', 'href'),
             ],
             [
                 Input('init_load_timer', 'n_intervals'),
             ],
             [
                 State('current_url', 'href'),
-                State('access_token', 'data'),
-                State('refresh_token', 'data'),
-                State('expires_at', 'data'),
-                State('expires_in', 'data'),
-                State('expires_timestamp', 'data'),
+                State('logged_in', 'data'),
             ],
             prevent_initial_call=True,
         )
-        def ensureAccessToken(n_intervals, current_url,
-                        access_token, refresh_token, expires_at, expires_in, expires_timestamp):
+        def initialStateCheck(n_intervals, current_url, logged_in):
+            # Failsafe, to make sure there's no random initial call.
+            # !! NB: The current code adds an HTML file with a map to the /assets/ folder, which triggers a
+            # hot reload. Had to disable that when running the app instance !!
             trigger_id = ctx.triggered[0]['prop_id'].split(".")[0]
-            if trigger_id is None:
-                print("Initial load (that should've been skipped!!!)")
+            if trigger_id is None or logged_in:
                 raise dash.exceptions.PreventUpdate
 
-            if access_token is not None:
-                self.access_token = access_token
-                self.refresh_token = refresh_token
-                self.expires_at = expires_at
-                self.expires_in = expires_in
-                self.expires_timestamp = expires_timestamp
-
             # Look for the auth-code in the current URL
-            code_start = current_url.find("code=")
+            if current_url is not None:
+                code_start = current_url.find("code=")
+            else:
+                code_start = -1
 
             # If there is no code in the URL, and we don't already have an access/refresh token, then we need to
             # go through an OAUTH step
             if code_start == -1 and (self.access_token is None or self.refresh_token is None):
-                return ([html.Div([
-                    html.P("Click the button below to authorise the dashboard to connect to your Strava page."),
-                    html.P("The access token will be stored in the browser session,"
-                           " so that you only have to click this button once"),
-                    html.P("If you ever see this page after authorising, it's either because you closed the browser"),
-                    html.P("...or because I've been a poor programmer :("),
-                    dbc.Button("Go to OAUTH page", id="getOAUTH")
-                ])], dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update)
+                return [
+                    dbc.Container([
+                        html.Br(),
+                        html.P("Click the button below to authorise the dashboard to connect to your Strava page."),
+                        dbc.Button("Go to OAUTH page", id="getOAUTH")
+                    ]),
+                    navbar_links_init,
+                    dash.no_update
+                ]
 
             # If we got this far, and there is an auth-code in the URL, but we have no access/refresh token, then
             # we must've been redirected to the Dash app after going through OAUTH. Let's fetch the tokens.
@@ -154,27 +190,14 @@ class DashApp:
                 code_end = code.find("&")
                 code = code[0:code_end]
 
-                # Get an access token and a refresh token. This'll let us access all the athlete information.
-                token_response = self.client.exchange_code_for_token(
+                # Get an access token and a refresh token. This will let us access all the athlete information.
+                response = self.client.exchange_code_for_token(
                     client_id=self.client_id,
                     client_secret=self.client_secret,
                     code=code
                 )
-
-                # Store the various bits of information into separate variables, for ease.
-                self.access_token = token_response['access_token']
-                self.refresh_token = token_response['refresh_token']
-                self.expires_at = token_response['expires_at']
-                self.expires_timestamp = dt.datetime.fromtimestamp(self.expires_at, dt.timezone.utc)
-                self.expires_in = (self.expires_timestamp - dt.datetime.now(dt.timezone.utc)).total_seconds()
-
-            print(f"Access token: {self.access_token}\n"
-                  f"Refresh token: {self.refresh_token}\n"
-                  f"Expires at: {self.expires_at}\n"
-                  f"Expires in: {self.expires_in}\n"
-                  f"Expires timestamp: {self.expires_timestamp}")
-
-            if self.expires_in <= 0:
+                self.setTokens(response=response, request_type="authorise")
+            elif self.expires_in <= 0:
                 print("Access token has expired. Need to refresh it.")
                 header = {
                     'client_id': self.client_id,
@@ -182,84 +205,117 @@ class DashApp:
                     'grant_type': 'refresh_token',
                     'refresh_token': self.refresh_token,
                 }
-
                 response = requests.post('https://www.strava.com/api/v3/oauth/token', data=header).json()
-                self.access_token = response['access_token']
-                self.refresh_token = response['refresh_token']
-                self.expires_at = response['expires_at']
-                self.expires_in = response['expires_in']
-                self.expires_timestamp = dt.datetime.now() + dt.timedelta(seconds=self.expires_in)
+                self.setTokens(response=response, request_type="refresh")
 
-            return ([html.P(f"Found an access token! It's {self.access_token}"),
-                     dbc.Button("Fetch athlete data", id="get_data")],
-                    self.access_token,
-                    self.refresh_token,
-                    self.expires_at,
-                    self.expires_in,
-                    self.expires_timestamp)
+            return [
+                dbc.Container([
+                    html.Br(),
+                    dbc.Button("Fetch athlete data", id="get_data")
+                ]),
+                navbar_links_logged_in,
+                "run"
+            ]
 
         # Add a callback here that fetches athlete data and stores it somewhere.
         # Could perhaps still use a dcc.Store for it, though it may become too much. Local storage possible, perhaps?
         # Or yeet it onto Firebase? Would be nice if it doesn't have to retrieve the data anew each time.
         @self.app.callback(
-            Output('hidden_div', 'children'),
-            Output('current_url', 'pathname'),
+            Output('page_content', 'children', allow_duplicate=True),
+            Output('logged_in', 'data'),
             Input('get_data', 'n_clicks'),
+            prevent_initial_call=True
         )
         def getData(n_clicks):
             if n_clicks is None:
                 raise dash.exceptions.PreventUpdate
 
-            athlete = self.client.get_athlete()
-            print(f"Athlete details:\n"
-                  f"Name: {athlete.firstname} {athlete.lastname}\n"
-                  f"Gender: {athlete.sex}\n"
-                  f"City: {athlete.city}\n"
-                  f"Country: {athlete.country}")
+            # Fetch the athlete, in case we want to do cool things with it.
+            self.athlete = self.client.get_athlete()
 
-            start_date = "2024-01-01T00:00:00Z"
-            activities = self.client.get_activities(after=start_date, limit=5)
-            pprint(vars(activities))
+            # Optionally, dump all athlete data into a JSON file.
+            # Probably want to snatch the gear out of this and such.
+            defun.writeShoeData(self.athlete)
 
-            print("Fetched activities")
+            end_date = dt.datetime.now()
+            start_date = dt.datetime.now() - dt.timedelta(weeks=4)
+
+            # This segment fetches activities within from the start date till the end date.
+            activities = self.client.get_activities(after=start_date, before=end_date, limit=50)
             activity_data = []
             for activity in activities:
                 activity_dict = activity.to_dict()
                 new_data = [activity_dict.get(x) for x in activity_cols]
                 activity_data.append(new_data)
 
+            # Optional function call to write the activity data into a JSON file, for reference.
+            defun.writeActivityDict(activities)
+
             activity_df = pd.DataFrame(activity_data, columns=activity_cols)
             activity_df['distance'] = activity_df['distance'] / 1000
             activity_df.to_csv("results/activities.csv", sep=';', encoding='utf-8')
-            print("Written activities to file.")
-
-            type_list = ['distance', 'time', 'latlng', 'altitude']
-
             activity_df = activity_df.loc[:, ~activity_df.columns.str.contains('^Unnamed')]
 
-            counter = 0
-            polyLineList = []
-            distanceList = []
-            for x in activity_df['id']:
-                counter += 1
-                print("Making the map for activity # %d" % counter)
-                activityStream = fun.getStream(self.client, type_list, x)
-                streamDF = fun.storeStream(type_list, activityStream)
-                if streamDF.shape[0] != 0:
-                    streamPoly = fun.makePolyLine(streamDF)
-                    polyLineList.append(streamPoly)
-                    distanceList.append(activity_df.loc[counter - 1, 'distance'])
+            # Split the activity dataframe up by activity type (Run, Bike, other)
+            run_id_list = activity_df.loc[activity_df['type'] == 'Run']['id']
+            ride_id_list = activity_df.loc[activity_df['type'] == 'Ride']['id']
 
-            activityMap = fun.plotMap(polyLineList, 0, distanceList)
-            indexPath = pathlib.Path(__file__).parent / "/templates/index.html"
+            # Fetch the activity-streams (i.e. location coordinates and such)
+            type_list = ['distance', 'time', 'latlng', 'altitude', 'heartrate']
 
-            activityJSON = activity_df.to_json(orient='index')
-            parsed = json.loads(activityJSON)
+            run_polyline_list = []
+            ride_polyline_list = []
 
-            # The callback function should end with updating the main page
-            raise dash.exceptions.PreventUpdate
+            run_polyline_list = self.genPolyLineList(base_list=run_polyline_list,
+                                                     fetch_data_types=type_list,
+                                                     id_list=run_id_list)
+            ride_polyline_list = self.genPolyLineList(base_list=ride_polyline_list,
+                                                      fetch_data_types=type_list,
+                                                      id_list=ride_id_list)
 
+            # Generate a map that displays medium-res polylines for all activities.
+            # This part is Folium-based, and I'm not sure whether I like that.
+            run_activity_map = fun.plotMap(run_polyline_list)
+            run_activity_map.save('assets/run_example.html')
 
+            ride_activity_map = fun.plotMap(ride_polyline_list)
+            ride_activity_map.save('assets/ride_example.html')
+
+            # activityJSON = activity_df.to_json(orient='index')
+            # parsed = json.loads(activityJSON)
+
+            # Update the main page by showing a map with the fetched activities.
+            return (html.Div([html.Iframe(src='assets/run_example.html', style={'height': '1000px', 'width': '100%'})]),
+                    True)
+            # raise dash.exceptions.PreventUpdate
+
+        @self.app.callback(
+            [
+                Output('page_content', 'children')
+            ],
+            [
+                Input('current_url', 'pathname')
+            ],
+            prevent_initial_call=True
+        )
+        def navbarLinks(current_url):
+            trigger_id = ctx.triggered[0]['prop_id'].split(".")[0]
+            if trigger_id is None:
+                raise dash.exceptions.PreventUpdate
+
+            print(f"current_url: {current_url}")
+
+            if current_url == "run":
+                return html.Div([
+                    html.Iframe(src='assets/run_example.html', style={'height': '1000px', 'width': '100%'})
+                ])
+            elif current_url == "ride":
+                return html.Div([
+                    html.Iframe(src='assets/ride_example.html', style={'height': '1000px', 'width': '100%'})
+                ])
+            else:
+                print("Invalid URL.")
+                return dash.no_update
 
     def runApp(self):
-        self.app.run_server(debug=True, port=8080)
+        self.app.run_server(debug=True, port=8080, dev_tools_hot_reload=False)

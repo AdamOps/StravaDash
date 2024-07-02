@@ -31,6 +31,9 @@ def makePolyLine(df) -> list:
 
 
 def plotMap(_activity_polyline):
+    if _activity_polyline is None:
+        print("Received None argument. Terminating function.")
+        return None
     activityMap = folium.Map(location=[_activity_polyline[0][0][0], _activity_polyline[0][0][1]], zoom_start=14,
                              width='100%')
     folium.TileLayer('cartodbpositron').add_to(activityMap)

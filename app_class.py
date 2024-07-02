@@ -95,13 +95,13 @@ class DashApp:
         if fetch_data_types is None:
             fetch_data_types = ['latlng']
         if len(id_list) == 0:
-            print("Passed an empty id-list. Breaking out of the function")
+            print("Passed an empty id-list. Breaking out of the function and returning None")
             return None
 
         counter = 0
         for activity_id in id_list:
             counter += 1
-            print("Making the map for run # %d" % counter)
+            print("Making the map for activity # %d" % counter)
             activity_stream = fun.getStream(_client=self.client, _fetch_data_types=fetch_data_types,
                                             _activity_id=activity_id)
             stream_df = fun.storeStream(fetch_data_types, activity_stream)
@@ -145,6 +145,7 @@ class DashApp:
                 Output('page_content', 'children', allow_duplicate=True),
                 Output('navbar_links', 'children'),
                 Output('current_url', 'href'),
+                Output('current_url', 'refresh'),
             ],
             [
                 Input('init_load_timer', 'n_intervals'),
@@ -156,11 +157,13 @@ class DashApp:
             prevent_initial_call=True,
         )
         def initialStateCheck(n_intervals, current_url, logged_in):
+            print("Checking whether this nonsense is getting triggered")
             # Failsafe, to make sure there's no random initial call.
             # !! NB: The current code adds an HTML file with a map to the /assets/ folder, which triggers a
             # hot reload. Had to disable that when running the app instance !!
             trigger_id = ctx.triggered[0]['prop_id'].split(".")[0]
             if trigger_id is None or logged_in:
+                print("Callback got triggered, but it ain't updating.")
                 raise dash.exceptions.PreventUpdate
 
             # Look for the auth-code in the current URL
@@ -179,6 +182,7 @@ class DashApp:
                         dbc.Button("Go to OAUTH page", id="getOAUTH")
                     ]),
                     navbar_links_init,
+                    dash.no_update,
                     dash.no_update
                 ]
 
@@ -214,7 +218,8 @@ class DashApp:
                     dbc.Button("Fetch athlete data", id="get_data")
                 ]),
                 navbar_links_logged_in,
-                "run"
+                "run",
+                False
             ]
 
         # Add a callback here that fetches athlete data and stores it somewhere.
@@ -233,6 +238,13 @@ class DashApp:
             # Fetch the athlete, in case we want to do cool things with it.
             self.athlete = self.client.get_athlete()
 
+            # Alternative call to fetch athlete details
+            header = {
+                'Authorization': f"Bearer {self.access_token}",
+            }
+            response = requests.get('https://www.strava.com/api/v3/athlete', data=header)
+            print(response)
+
             # Optionally, dump all athlete data into a JSON file.
             # Probably want to snatch the gear out of this and such.
             defun.writeShoeData(self.athlete)
@@ -240,7 +252,7 @@ class DashApp:
             end_date = dt.datetime.now()
             start_date = dt.datetime.now() - dt.timedelta(weeks=4)
 
-            # This segment fetches activities within from the start date till the end date.
+            # This code chunk fetches activities within from the start date till the end date.
             activities = self.client.get_activities(after=start_date, before=end_date, limit=50)
             activity_data = []
             for activity in activities:
@@ -276,10 +288,16 @@ class DashApp:
             # Generate a map that displays medium-res polylines for all activities.
             # This part is Folium-based, and I'm not sure whether I like that.
             run_activity_map = fun.plotMap(run_polyline_list)
-            run_activity_map.save('assets/run_example.html')
+            try:
+                run_activity_map.save('assets/run_example.html')
+            except:
+                print("run_activity_map is empty")
 
             ride_activity_map = fun.plotMap(ride_polyline_list)
-            ride_activity_map.save('assets/ride_example.html')
+            try:
+                ride_activity_map.save('assets/ride_example.html')
+            except:
+                print("ride_activity_map is empty")
 
             # activityJSON = activity_df.to_json(orient='index')
             # parsed = json.loads(activityJSON)
@@ -290,28 +308,29 @@ class DashApp:
             # raise dash.exceptions.PreventUpdate
 
         @self.app.callback(
-            [
-                Output('page_content', 'children')
-            ],
-            [
-                Input('current_url', 'pathname')
-            ],
+            Output('page_content', 'children', allow_duplicate=True),
+            Input('current_url', 'pathname'),
+            State('logged_in', 'data'),
             prevent_initial_call=True
         )
-        def navbarLinks(current_url):
+        def navbarLinks(current_url, logged_in):
             trigger_id = ctx.triggered[0]['prop_id'].split(".")[0]
-            if trigger_id is None:
+            if trigger_id is None or not logged_in:
                 raise dash.exceptions.PreventUpdate
 
             print(f"current_url: {current_url}")
 
-            if current_url == "run":
+            if current_url == "/runs":
                 return html.Div([
                     html.Iframe(src='assets/run_example.html', style={'height': '1000px', 'width': '100%'})
                 ])
-            elif current_url == "ride":
+            elif current_url == "/rides":
                 return html.Div([
                     html.Iframe(src='assets/ride_example.html', style={'height': '1000px', 'width': '100%'})
+                ])
+            elif current_url == "/gear":
+                return html.Div([
+                    html.P("Work in progress.")
                 ])
             else:
                 print("Invalid URL.")

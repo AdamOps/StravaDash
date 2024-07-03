@@ -238,16 +238,17 @@ class DashApp:
             # Fetch the athlete, in case we want to do cool things with it.
             self.athlete = self.client.get_athlete()
 
-            # Alternative call to fetch athlete details
-            header = {
-                'Authorization': f"Bearer {self.access_token}",
-            }
-            response = requests.get('https://www.strava.com/api/v3/athlete', data=header)
-            print(response)
+            # Get the gear, write the summary data to a JSON file and return a list of IDs (for a more detailed fetch)
+            shoe_id_list = defun.writeShoeData(self.athlete)
+            gear_list = []
+            for gear_id in shoe_id_list:
+                new_gear = self.client.get_gear(gear_id=gear_id)
+                gear_list.append(new_gear.to_dict())
 
-            # Optionally, dump all athlete data into a JSON file.
-            # Probably want to snatch the gear out of this and such.
-            defun.writeShoeData(self.athlete)
+            # Optionally: Write all the gear info to a file
+            with open("ref/gear_data.json", "w", encoding="utf-8") as file:
+                json.dump(gear_list, file, ensure_ascii=False, indent=4)
+
 
             end_date = dt.datetime.now()
             start_date = dt.datetime.now() - dt.timedelta(weeks=4)
